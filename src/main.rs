@@ -1,11 +1,13 @@
 use std::{
+    env,
     fs,
     io::{self, stdout},
     path::PathBuf,
+    process::Command,
     time::{Duration, Instant},
 };
 
-use chrono::{Local, NaiveDate};
+use chrono::{Local, NaiveDate, Timelike};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -138,6 +140,21 @@ mod pet {
     pub const GHOST_ADULT_HAPPY: &[&str] = &[" ★.---.★", "  (^o^) ", " ★\\^^^/★"];
     pub const GHOST_ADULT_WORK: &[&str] = &[" ★.---.★", "  (◉_◉) ", " ★\\_.~/★"];
     pub const GHOST_ADULT_SLEEP: &[&str] = &[" ★.---.★", "  (-_-) ", "z★\\~~~/★"];
+
+    // === DEAD ===
+    pub const DEAD_BLOB: &[&str] = &[" (x_x) ", "  /|\\  ", "  RIP  "];
+    pub const DEAD_CAT: &[&str] = &[" /\\_/\\ ", "( x.x )", "  RIP  "];
+    pub const DEAD_ROBOT: &[&str] = &[" [x_x] ", "  ]|[  ", "  RIP  "];
+    pub const DEAD_GHOST: &[&str] = &[" .---. ", "( x x )", "  RIP  "];
+
+    pub fn get_dead_art(pet_type: PetType) -> &'static [&'static str] {
+        match pet_type {
+            PetType::Blob => DEAD_BLOB,
+            PetType::Cat => DEAD_CAT,
+            PetType::Robot => DEAD_ROBOT,
+            PetType::Ghost => DEAD_GHOST,
+        }
+    }
 
     pub fn get_art(pet_type: PetType, stage: u32, mood: super::PetMood, frame: usize) -> &'static [&'static str] {
         use super::PetMood;
@@ -277,6 +294,14 @@ struct GameData {
     pet_name: String,
     pet_type: PetType,
     mood: PetMood,
+    // Food system (0-100)
+    food: u32,
+    #[serde(default)]
+    last_food_check: Option<i64>, // Unix timestamp
+    #[serde(default)]
+    hunger_zero_since: Option<i64>, // When food hit 0
+    #[serde(default)]
+    is_dead: bool,
 }
 
 impl Default for GameData {
@@ -294,6 +319,10 @@ impl Default for GameData {
             pet_name: "Tomo".to_string(),
             pet_type,
             mood: PetMood::Idle,
+            food: 100,
+            last_food_check: Some(Local::now().timestamp()),
+            hunger_zero_since: None,
+            is_dead: false,
         }
     }
 }
@@ -376,6 +405,9 @@ impl GameData {
         let streak_bonus = (self.streak_days.min(7) * 5) as u32;
         self.add_xp(base_xp + streak_bonus);
 
+        // Replenish food
+        self.feed(25);
+
         self.mood = PetMood::Happy;
         self.save();
     }
@@ -393,7 +425,11 @@ impl GameData {
     }
 
     fn get_pet_art(&self, frame: usize) -> &'static [&'static str] {
-        pet::get_art(self.pet_type, self.evolution_stage(), self.mood, frame)
+        if self.is_dead {
+            pet::get_dead_art(self.pet_type)
+        } else {
+            pet::get_art(self.pet_type, self.evolution_stage(), self.mood, frame)
+        }
     }
 
     fn stage_name(&self) -> &'static str {
@@ -402,6 +438,99 @@ impl GameData {
             2 => "Baby",
             3 => "Teen",
             _ => "Master",
+        }
+    }
+
+    fn is_daytime() -> bool {
+        let hour = Local::now().hour();
+        hour >= 6 && hour < 22 // 6am to 10pm
+    }
+
+    fn hunger_cry(&self) -> &'static str {
+        match self.pet_type {
+            PetType::Blob => "I'm so hungry... please help me! I need food! 😢",
+            PetType::Cat => "Meow... *weak* ...please... food... I'm starving... 🐱",
+            PetType::Robot => "CRITICAL: Energy depleted... shutting down... need fuel... 🤖",
+            PetType::Ghost => "I'm fading away... so hungry... please don't let me disappear... 👻",
+        }
+    }
+
+    fn death_cry(&self) -> &'static str {
+        match self.pet_type {
+            PetType::Blob => "Goodbye... I waited but you never came... 💔",
+            PetType::Cat => "Meow... *silence* ...goodbye friend... 🐱💔",
+            PetType::Robot => "SYSTEM FAILURE... memory banks... fading... goodbye... 🤖💔",
+            PetType::Ghost => "I'm disappearing forever... I'll miss you... 👻💔",
+        }
+    }
+
+    fn send_notification(title: &str, message: &str) {
+        let script = format!(
+            "display notification \"{}\" with title \"{}\"",
+            message.replace('"', "\\\""),
+            title.replace('"', "\\\"")
+        );
+        Command::new("osascript")
+            .args(["-e", &script])
+            .spawn()
+            .ok();
+    }
+
+    fn update_food(&mut self) {
+        // Don't update if already dead
+        if self.is_dead {
+            return;
+        }
+
+        let now = Local::now().timestamp();
+
+        // Initialize if not set
+        if self.last_food_check.is_none() {
+            self.last_food_check = Some(now);
+            return;
+        }
+
+        let last_check = self.last_food_check.unwrap();
+        let elapsed_mins = ((now - last_check) / 60) as u32;
+
+        // Only decrease during daytime, ~1 food per 10 minutes (lasts ~16 hours)
+        if Self::is_daytime() && elapsed_mins >= 10 {
+            let decrease = elapsed_mins / 10;
+            let was_fed = self.food > 0;
+            self.food = self.food.saturating_sub(decrease);
+            self.last_food_check = Some(now);
+
+            // Food just hit 0 - send notification and start death timer
+            if was_fed && self.food == 0 {
+                self.hunger_zero_since = Some(now);
+                Self::send_notification("Tamadoro - HUNGRY!", self.hunger_cry());
+            }
+
+            self.save();
+        } else if !Self::is_daytime() {
+            // Update timestamp during night so we don't accumulate
+            self.last_food_check = Some(now);
+        }
+
+        // Check for death (3 hours = 10800 seconds at 0 food)
+        if self.food == 0 {
+            if let Some(zero_since) = self.hunger_zero_since {
+                if now - zero_since >= 10800 {
+                    self.is_dead = true;
+                    Self::send_notification("Tamadoro - 💀", self.death_cry());
+                    self.save();
+                }
+            }
+        } else {
+            // Food > 0, reset death timer
+            self.hunger_zero_since = None;
+        }
+    }
+
+    fn feed(&mut self, amount: u32) {
+        self.food = (self.food + amount).min(100);
+        if self.food > 0 {
+            self.hunger_zero_since = None;
         }
     }
 }
@@ -416,10 +545,12 @@ struct App {
     game: GameData,
     frame: usize,
     message: Option<(String, Instant)>,
+    paused_from_state: Option<PomodoroState>, // Track what state we paused from
+    test_mode: bool, // Whether --test flag was passed
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(test_mode: bool) -> Self {
         let work_duration = Duration::from_secs(25 * 60);
 
         App {
@@ -432,11 +563,16 @@ impl App {
             game: GameData::load(),
             frame: 0,
             message: None,
+            paused_from_state: None,
+            test_mode,
         }
     }
 
     fn tick(&mut self) {
         self.frame = self.frame.wrapping_add(1);
+
+        // Update food (decreases during daytime)
+        self.game.update_food();
 
         // Clear old messages
         if let Some((_, time)) = &self.message {
@@ -489,11 +625,13 @@ impl App {
                     self.pomo_state = PomodoroState::Break;
                     self.pomo_total = Duration::from_secs(5 * 60);
                     self.pomo_remaining = self.pomo_total;
+                    self.paused_from_state = None; // Clear saved state on natural transition
                     self.game.mood = PetMood::Resting;
                 } else {
                     self.pomo_state = PomodoroState::Paused;
                     self.pomo_total = Duration::from_secs(25 * 60);
                     self.pomo_remaining = self.pomo_total;
+                    self.paused_from_state = None; // Clear saved state on natural transition
                     self.game.mood = PetMood::Idle;
                     self.message = Some(("Break over! Ready?".to_string(), Instant::now()));
                 }
@@ -504,12 +642,23 @@ impl App {
     fn toggle_pomo(&mut self) {
         match self.pomo_state {
             PomodoroState::Paused => {
-                self.pomo_state = PomodoroState::Work;
+                // Resume to the state we paused from, or default to Work
+                let resume_state = self.paused_from_state.unwrap_or(PomodoroState::Work);
+                self.pomo_state = resume_state;
+                self.paused_from_state = None; // Clear the saved state
                 self.last_tick = Instant::now();
-                self.game.mood = PetMood::Working;
+
+                // Set mood based on what state we're resuming to
+                self.game.mood = match resume_state {
+                    PomodoroState::Work => PetMood::Working,
+                    PomodoroState::Break => PetMood::Resting,
+                    PomodoroState::Paused => PetMood::Idle,
+                };
                 self.game.save();
             }
             _ => {
+                // Save the current state before pausing
+                self.paused_from_state = Some(self.pomo_state);
                 self.pomo_state = PomodoroState::Paused;
                 self.game.mood = PetMood::Idle;
                 self.game.save();
@@ -521,17 +670,21 @@ impl App {
         self.pomo_state = PomodoroState::Paused;
         self.pomo_total = Duration::from_secs(25 * 60);
         self.pomo_remaining = self.pomo_total;
+        self.paused_from_state = None; // Clear saved state on reset
         self.game.mood = PetMood::Idle;
         self.game.save();
     }
 }
 
 fn main() -> io::Result<()> {
+    // Check for --test flag
+    let test_mode = env::args().any(|arg| arg == "--test");
+
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
-    let mut app = App::new();
+    let mut app = App::new(test_mode);
     let tick_rate = Duration::from_millis(250);
 
     loop {
@@ -546,7 +699,13 @@ fn main() -> io::Result<()> {
                             app.mode = match app.mode {
                                 Mode::Timer => Mode::Pet,
                                 Mode::Pet => Mode::Stats,
-                                Mode::Stats => Mode::Debug,
+                                Mode::Stats => {
+                                    if app.test_mode {
+                                        Mode::Debug
+                                    } else {
+                                        Mode::Timer
+                                    }
+                                }
                                 Mode::Debug => Mode::Timer,
                             };
                         }
@@ -601,6 +760,28 @@ fn main() -> io::Result<()> {
                             app.game.save();
                             app.message = Some((format!("Pet -> {}", app.game.pet_type.name()), Instant::now()));
                         }
+                        KeyCode::Char('7') if app.mode == Mode::Debug => {
+                            app.game.feed(25);
+                            app.game.save();
+                            app.message = Some((format!("Food -> {}", app.game.food), Instant::now()));
+                        }
+                        KeyCode::Char('8') if app.mode == Mode::Debug => {
+                            app.game.food = app.game.food.saturating_sub(25);
+                            app.game.save();
+                            app.message = Some((format!("Food -> {}", app.game.food), Instant::now()));
+                        }
+                        KeyCode::Char('9') if app.mode == Mode::Debug => {
+                            app.game.is_dead = !app.game.is_dead;
+                            if !app.game.is_dead {
+                                app.game.food = 50; // Revive with some food
+                                app.game.hunger_zero_since = None;
+                            }
+                            app.game.save();
+                            app.message = Some((
+                                if app.game.is_dead { "Pet died!".to_string() } else { "Pet revived!".to_string() },
+                                Instant::now()
+                            ));
+                        }
                         KeyCode::Char('0') if app.mode == Mode::Debug => {
                             app.game = GameData::default();
                             app.game.save();
@@ -653,7 +834,7 @@ fn ui(f: &mut Frame, app: &App) {
         .split(inner);
 
     // Tabs
-    let tabs = Line::from(vec![
+    let mut tab_spans = vec![
         Span::styled(
             "TIMER",
             if app.mode == Mode::Timer {
@@ -680,16 +861,22 @@ fn ui(f: &mut Frame, app: &App) {
                 Style::default().fg(colors::COMMENT)
             },
         ),
-        Span::raw(" "),
-        Span::styled(
+    ];
+
+    // Only show DEBUG tab when in test mode
+    if app.test_mode {
+        tab_spans.push(Span::raw(" "));
+        tab_spans.push(Span::styled(
             "DEBUG",
             if app.mode == Mode::Debug {
                 Style::default().fg(colors::BG).bg(colors::RED).bold()
             } else {
                 Style::default().fg(colors::COMMENT)
             },
-        ),
-    ]);
+        ));
+    }
+
+    let tabs = Line::from(tab_spans);
     f.render_widget(Paragraph::new(tabs).alignment(Alignment::Center), chunks[0]);
 
     match app.mode {
@@ -825,6 +1012,8 @@ fn render_pet(f: &mut Frame, area: Rect, app: &App) {
             Constraint::Length(1), // Level
             Constraint::Length(1), // XP
             Constraint::Length(1), // XP bar
+            Constraint::Length(1), // Food
+            Constraint::Length(1), // Food bar
             Constraint::Min(0),    // Spacer
         ])
         .split(area);
@@ -894,6 +1083,30 @@ fn render_pet(f: &mut Frame, area: Rect, app: &App) {
             .ratio(xp_progress)
             .label(""),
         chunks[5],
+    );
+
+    // Food
+    f.render_widget(
+        Paragraph::new(format!("Food: {}/100", app.game.food))
+            .style(Style::default().fg(colors::GREEN))
+            .alignment(Alignment::Center),
+        chunks[6],
+    );
+
+    // Food bar
+    let food_progress = app.game.food as f64 / 100.0;
+    f.render_widget(
+        Gauge::default()
+            .gauge_style(Style::default().fg(if app.game.food > 30 {
+                colors::GREEN
+            } else if app.game.food > 10 {
+                colors::YELLOW
+            } else {
+                colors::RED
+            }))
+            .ratio(food_progress)
+            .label(""),
+        chunks[7],
     );
 }
 
@@ -965,9 +1178,9 @@ fn render_debug(f: &mut Frame, area: Rect, app: &App) {
         .constraints([
             Constraint::Length(1), // Header
             Constraint::Length(1), // Spacer
-            Constraint::Length(1), // Current state
             Constraint::Length(1), // Level/XP
             Constraint::Length(1), // Stage
+            Constraint::Length(1), // Food
             Constraint::Length(1), // Streak
             Constraint::Length(1), // Spacer
             Constraint::Length(1), // Controls header
@@ -976,6 +1189,8 @@ fn render_debug(f: &mut Frame, area: Rect, app: &App) {
             Constraint::Length(1), // Control 3
             Constraint::Length(1), // Control 4
             Constraint::Length(1), // Control 5
+            Constraint::Length(1), // Control 6
+            Constraint::Length(1), // Control 7
             Constraint::Min(0),    // Spacer
         ])
         .split(area);
@@ -1006,16 +1221,29 @@ fn render_debug(f: &mut Frame, area: Rect, app: &App) {
         chunks[3],
     );
 
+    let food_text = if app.game.is_dead {
+        "DEAD 💀".to_string()
+    } else {
+        format!("Food: {}/100", app.game.food)
+    };
     f.render_widget(
-        Paragraph::new(format!("Streak: {} days", app.game.streak_days))
-            .style(Style::default().fg(colors::YELLOW))
+        Paragraph::new(food_text)
+            .style(Style::default().fg(if app.game.is_dead {
+                colors::RED
+            } else if app.game.food > 30 {
+                colors::GREEN
+            } else if app.game.food > 10 {
+                colors::YELLOW
+            } else {
+                colors::RED
+            }))
             .alignment(Alignment::Center),
         chunks[4],
     );
 
     f.render_widget(
-        Paragraph::new(format!("Sessions: {}", app.game.total_sessions))
-            .style(Style::default().fg(colors::COMMENT))
+        Paragraph::new(format!("Streak: {} | Sessions: {}", app.game.streak_days, app.game.total_sessions))
+            .style(Style::default().fg(colors::YELLOW))
             .alignment(Alignment::Center),
         chunks[5],
     );
@@ -1049,9 +1277,23 @@ fn render_debug(f: &mut Frame, area: Rect, app: &App) {
     );
 
     f.render_widget(
+        Paragraph::new("7: +Food 8: -Food")
+            .style(Style::default().fg(colors::GREEN))
+            .alignment(Alignment::Center),
+        chunks[11],
+    );
+
+    f.render_widget(
+        Paragraph::new("9: Kill/Revive")
+            .style(Style::default().fg(if app.game.is_dead { colors::GREEN } else { colors::RED }))
+            .alignment(Alignment::Center),
+        chunks[12],
+    );
+
+    f.render_widget(
         Paragraph::new("0: RESET ALL")
             .style(Style::default().fg(colors::RED))
             .alignment(Alignment::Center),
-        chunks[11],
+        chunks[13],
     );
 }
