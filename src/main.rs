@@ -647,6 +647,7 @@ fn ui(f: &mut Frame, app: &App) {
             Constraint::Length(1), // Tabs
             Constraint::Length(1), // Spacer
             Constraint::Min(0),    // Content
+            Constraint::Length(1), // Clock
             Constraint::Length(1), // Message/Help
         ])
         .split(inner);
@@ -698,6 +699,16 @@ fn ui(f: &mut Frame, app: &App) {
         Mode::Debug => render_debug(f, chunks[2], app),
     }
 
+    // Clock
+    let now = Local::now();
+    let clock = format!("{}", now.format("%H:%M"));
+    f.render_widget(
+        Paragraph::new(clock)
+            .style(Style::default().fg(colors::COMMENT))
+            .alignment(Alignment::Center),
+        chunks[3],
+    );
+
     // Message or help
     let bottom_text = if let Some((msg, _)) = &app.message {
         Line::from(Span::styled(msg, Style::default().fg(colors::YELLOW).bold()))
@@ -713,7 +724,7 @@ fn ui(f: &mut Frame, app: &App) {
     };
     f.render_widget(
         Paragraph::new(bottom_text).alignment(Alignment::Center),
-        chunks[3],
+        chunks[4],
     );
 }
 
