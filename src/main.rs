@@ -13,7 +13,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
-use rand::Rng;
+use rand::{seq::SliceRandom, Rng};
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Gauge, Paragraph},
@@ -32,6 +32,104 @@ mod colors {
     pub const MAGENTA: Color = Color::Rgb(187, 154, 247);
     pub const CYAN: Color = Color::Rgb(125, 207, 255);
     pub const COMMENT: Color = Color::Rgb(86, 95, 137);
+}
+
+// Large ASCII digits for clock display (tty-clock style, all 7 chars wide)
+mod ascii_digits {
+    pub const DIGIT_0: &[&str] = &[
+        "███████",
+        "██   ██",
+        "██   ██",
+        "██   ██",
+        "███████",
+    ];
+    pub const DIGIT_1: &[&str] = &[
+        "     ██",
+        "     ██",
+        "     ██",
+        "     ██",
+        "     ██",
+    ];
+    pub const DIGIT_2: &[&str] = &[
+        "███████",
+        "     ██",
+        "███████",
+        "██     ",
+        "███████",
+    ];
+    pub const DIGIT_3: &[&str] = &[
+        "███████",
+        "     ██",
+        "███████",
+        "     ██",
+        "███████",
+    ];
+    pub const DIGIT_4: &[&str] = &[
+        "██   ██",
+        "██   ██",
+        "███████",
+        "     ██",
+        "     ██",
+    ];
+    pub const DIGIT_5: &[&str] = &[
+        "███████",
+        "██     ",
+        "███████",
+        "     ██",
+        "███████",
+    ];
+    pub const DIGIT_6: &[&str] = &[
+        "███████",
+        "██     ",
+        "███████",
+        "██   ██",
+        "███████",
+    ];
+    pub const DIGIT_7: &[&str] = &[
+        "███████",
+        "     ██",
+        "     ██",
+        "     ██",
+        "     ██",
+    ];
+    pub const DIGIT_8: &[&str] = &[
+        "███████",
+        "██   ██",
+        "███████",
+        "██   ██",
+        "███████",
+    ];
+    pub const DIGIT_9: &[&str] = &[
+        "███████",
+        "██   ██",
+        "███████",
+        "     ██",
+        "███████",
+    ];
+    pub const COLON: &[&str] = &[
+        " ",
+        "█",
+        " ",
+        "█",
+        " ",
+    ];
+
+    pub fn get_digit(d: char) -> &'static [&'static str] {
+        match d {
+            '0' => DIGIT_0,
+            '1' => DIGIT_1,
+            '2' => DIGIT_2,
+            '3' => DIGIT_3,
+            '4' => DIGIT_4,
+            '5' => DIGIT_5,
+            '6' => DIGIT_6,
+            '7' => DIGIT_7,
+            '8' => DIGIT_8,
+            '9' => DIGIT_9,
+            ':' => COLON,
+            _ => DIGIT_0,
+        }
+    }
 }
 
 // Pet types
@@ -547,11 +645,16 @@ struct App {
     message: Option<(String, Instant)>,
     paused_from_state: Option<PomodoroState>, // Track what state we paused from
     test_mode: bool, // Whether --test flag was passed
+    pet_speech: Option<(String, Instant)>, // Current speech and when it started
+    next_speech_time: Instant, // When the next speech should trigger
 }
 
 impl App {
     fn new(test_mode: bool) -> Self {
         let work_duration = Duration::from_secs(25 * 60);
+        let now = Instant::now();
+        // First speech in 30-60 seconds
+        let next_speech_delay = Duration::from_secs(rand::thread_rng().gen_range(30..60));
 
         App {
             mode: Mode::Timer,
@@ -559,12 +662,14 @@ impl App {
             pomo_remaining: work_duration,
             pomo_total: work_duration,
             pomo_sessions: 0,
-            last_tick: Instant::now(),
+            last_tick: now,
             game: GameData::load(),
             frame: 0,
             message: None,
             paused_from_state: None,
             test_mode,
+            pet_speech: None,
+            next_speech_time: now + next_speech_delay,
         }
     }
 
@@ -578,6 +683,22 @@ impl App {
         if let Some((_, time)) = &self.message {
             if time.elapsed() > Duration::from_secs(3) {
                 self.message = None;
+            }
+        }
+
+        // Handle pet speech
+        if let Some((_, time)) = &self.pet_speech {
+            // Clear speech after 5 seconds
+            if time.elapsed() > Duration::from_secs(5) {
+                self.pet_speech = None;
+            }
+        } else {
+            // Check if it's time for new speech
+            if Instant::now() >= self.next_speech_time {
+                let phrase = self.get_pet_phrase();
+                self.pet_speech = Some((phrase.to_string(), Instant::now()));
+                // Next speech in 45-120 seconds
+                self.next_speech_time = Instant::now() + Duration::from_secs(rand::thread_rng().gen_range(45..120));
             }
         }
 
@@ -674,6 +795,57 @@ impl App {
         self.game.mood = PetMood::Idle;
         self.game.save();
     }
+
+    fn get_pet_phrase(&self) -> &'static str {
+        use PetMood::*;
+        use PetType::*;
+
+        // Special cases first
+        if self.game.is_dead {
+            return match self.game.pet_type {
+                Blob => "...",
+                Cat => "*silence*",
+                Robot => "ERROR 404",
+                Ghost => "......",
+            };
+        }
+
+        if self.game.food < 20 {
+            return match self.game.pet_type {
+                Blob => "I'm hungry...",
+                Cat => "Meow! Feed me!",
+                Robot => "Low energy!",
+                Ghost => "Need food...",
+            };
+        }
+
+        match self.game.mood {
+            Working => match self.game.pet_type {
+                Blob => *["You got this!", "Keep going!", "Focus!", "Stay strong!"].choose(&mut rand::thread_rng()).unwrap(),
+                Cat => *["Purr... working hard?", "Meow! Stay focused!", "You're doing great!", "Keep it up, human!"].choose(&mut rand::thread_rng()).unwrap(),
+                Robot => *["PROCESSING...", "Productivity mode!", "Executing tasks!", "System optimal!"].choose(&mut rand::thread_rng()).unwrap(),
+                Ghost => *["Boo! Keep working!", "You can do it!", "Floating by to cheer!", "Focus time!"].choose(&mut rand::thread_rng()).unwrap(),
+            },
+            Happy => match self.game.pet_type {
+                Blob => *["Yay! We did it!", "So happy!", "Woohoo!", "Great work!"].choose(&mut rand::thread_rng()).unwrap(),
+                Cat => *["Purrrr~", "Meow! ^w^", "Head pats please!", "You're the best!"].choose(&mut rand::thread_rng()).unwrap(),
+                Robot => *["SUCCESS!", "Task completed!", "Happiness.exe", "Achievement unlocked!"].choose(&mut rand::thread_rng()).unwrap(),
+                Ghost => *["Boo! Yay!", "Spooky happy!", "We did it!", "Ghostly cheer!"].choose(&mut rand::thread_rng()).unwrap(),
+            },
+            Resting => match self.game.pet_type {
+                Blob => *["zzz...", "Nice break...", "Relaxing~", "So comfy..."].choose(&mut rand::thread_rng()).unwrap(),
+                Cat => *["*yawn* meow", "Nap time!", "zzz purr zzz", "Sleep well~"].choose(&mut rand::thread_rng()).unwrap(),
+                Robot => *["Sleep mode...", "Recharging...", "Systems idle...", "zzz beep zzz"].choose(&mut rand::thread_rng()).unwrap(),
+                Ghost => *["Floating dreams...", "zzz boo zzz", "Resting~", "Peaceful..."].choose(&mut rand::thread_rng()).unwrap(),
+            },
+            Idle => match self.game.pet_type {
+                Blob => *["Hello!", "Ready when you are!", "Let's work!", "How are you?"].choose(&mut rand::thread_rng()).unwrap(),
+                Cat => *["Meow!", "Pet me!", "*stares*", "Let's go!"].choose(&mut rand::thread_rng()).unwrap(),
+                Robot => *["READY.", "Standing by!", "Awaiting input!", "Hello, human!"].choose(&mut rand::thread_rng()).unwrap(),
+                Ghost => *["Boo!", "Floating here~", "Ready to help!", "Let's start!"].choose(&mut rand::thread_rng()).unwrap(),
+            },
+        }
+    }
 }
 
 fn main() -> io::Result<()> {
@@ -707,6 +879,20 @@ fn main() -> io::Result<()> {
                                     }
                                 }
                                 Mode::Debug => Mode::Timer,
+                            };
+                        }
+                        KeyCode::BackTab => {
+                            app.mode = match app.mode {
+                                Mode::Timer => {
+                                    if app.test_mode {
+                                        Mode::Debug
+                                    } else {
+                                        Mode::Stats
+                                    }
+                                }
+                                Mode::Pet => Mode::Timer,
+                                Mode::Stats => Mode::Pet,
+                                Mode::Debug => Mode::Stats,
                             };
                         }
                         KeyCode::Char(' ') => {
@@ -802,6 +988,59 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
+fn render_large_clock(f: &mut Frame, area: Rect) {
+    let now = Local::now();
+    let time_str = format!("{}", now.format("%H%M")); // Remove colon
+
+    // Build the 5 lines of the clock
+    let mut lines: Vec<String> = vec![String::new(); 5];
+
+    for (idx, ch) in time_str.chars().enumerate() {
+        let digit_art = ascii_digits::get_digit(ch);
+        for (i, line) in digit_art.iter().enumerate() {
+            lines[i].push_str(line);
+            // Add spacing: 1 space within groups, 2 spaces between hour and minute
+            if idx == 0 {
+                // After first hour digit
+                lines[i].push(' ');
+            } else if idx == 1 {
+                // After second hour digit (between hours and minutes) - 2 spaces for separation
+                lines[i].push_str("  ");
+            } else if idx == 2 {
+                // After first minute digit
+                lines[i].push(' ');
+            }
+            // idx == 3 (last digit) gets no space
+        }
+    }
+
+    // Create a layout to vertically center the clock
+    // Calculate explicit padding (area is 7 lines, clock is 5 lines, so 2 lines to split)
+    let clock_height = 5;
+    let total_padding = area.height.saturating_sub(clock_height);
+    let top_padding = total_padding / 2;
+    let bottom_padding = total_padding - top_padding;
+
+    let v_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(top_padding),    // Top padding (explicit)
+            Constraint::Length(clock_height),   // Clock (5 lines)
+            Constraint::Length(bottom_padding), // Bottom padding (explicit)
+        ])
+        .split(area);
+
+    let clock_text: Vec<Line> = lines
+        .iter()
+        .map(|line| Line::from(Span::styled(line, Style::default().fg(colors::FG))))
+        .collect();
+
+    f.render_widget(
+        Paragraph::new(clock_text).alignment(Alignment::Center),
+        v_chunks[1],
+    );
+}
+
 fn ui(f: &mut Frame, app: &App) {
     let area = f.area();
 
@@ -827,8 +1066,8 @@ fn ui(f: &mut Frame, app: &App) {
         .constraints([
             Constraint::Length(1), // Tabs
             Constraint::Length(1), // Spacer
-            Constraint::Min(0),    // Content
-            Constraint::Length(1), // Clock
+            Constraint::Min(10),   // Content (minimum height)
+            Constraint::Min(5),    // Clock area (takes remaining space, min 5 for clock)
             Constraint::Length(1), // Message/Help
         ])
         .split(inner);
@@ -886,15 +1125,8 @@ fn ui(f: &mut Frame, app: &App) {
         Mode::Debug => render_debug(f, chunks[2], app),
     }
 
-    // Clock
-    let now = Local::now();
-    let clock = format!("{}", now.format("%H:%M"));
-    f.render_widget(
-        Paragraph::new(clock)
-            .style(Style::default().fg(colors::COMMENT))
-            .alignment(Alignment::Center),
-        chunks[3],
-    );
+    // Large ASCII Clock
+    render_large_clock(f, chunks[3]);
 
     // Message or help
     let bottom_text = if let Some((msg, _)) = &app.message {
@@ -928,27 +1160,30 @@ fn render_timer(f: &mut Frame, area: Rect, app: &App) {
         ])
         .split(area);
 
-    // Mini pet
-    let pet_art = app.game.get_pet_art(app.frame / 2);
-    let pet_text: Vec<Line> = pet_art
-        .iter()
-        .map(|line| {
-            Line::from(Span::styled(
-                *line,
-                Style::default().fg(if app.pomo_state == PomodoroState::Work {
-                    colors::RED
-                } else if app.pomo_state == PomodoroState::Break {
-                    colors::GREEN
-                } else {
-                    colors::CYAN
-                }),
-            ))
-        })
-        .collect();
-    f.render_widget(
-        Paragraph::new(pet_text).alignment(Alignment::Center),
-        chunks[0],
-    );
+    // Mini pet with optional speech
+    let pet_color = if app.pomo_state == PomodoroState::Work {
+        colors::RED
+    } else if app.pomo_state == PomodoroState::Break {
+        colors::GREEN
+    } else {
+        colors::CYAN
+    };
+
+    if let Some((speech, _)) = &app.pet_speech {
+        render_pet_with_speech(f, chunks[0], app, speech, pet_color);
+    } else {
+        let pet_art = app.game.get_pet_art(app.frame / 2);
+        let pet_text: Vec<Line> = pet_art
+            .iter()
+            .map(|line| {
+                Line::from(Span::styled(*line, Style::default().fg(pet_color)))
+            })
+            .collect();
+        f.render_widget(
+            Paragraph::new(pet_text).alignment(Alignment::Center),
+            chunks[0],
+        );
+    }
 
     // State
     let (state_text, state_color) = match app.pomo_state {
@@ -1002,12 +1237,59 @@ fn render_timer(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+fn render_pet_with_speech(f: &mut Frame, area: Rect, app: &App, speech: &str, pet_color: Color) {
+    // Create horizontal layout: left padding, pet, speech bubble, right padding
+    let h_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(20), // Left padding
+            Constraint::Length(10),     // Pet
+            Constraint::Length(20),     // Speech bubble
+            Constraint::Min(0),         // Right padding
+        ])
+        .split(area);
+
+    // Render pet
+    let pet_art = app.game.get_pet_art(app.frame / 2);
+    let pet_text: Vec<Line> = pet_art
+        .iter()
+        .map(|line| {
+            Line::from(Span::styled(*line, Style::default().fg(pet_color)))
+        })
+        .collect();
+    f.render_widget(
+        Paragraph::new(pet_text).alignment(Alignment::Center),
+        h_chunks[1],
+    );
+
+    // Render speech bubble
+    let bubble_border = "─".repeat(speech.len().min(18));
+    let speech_trimmed = if speech.len() > 18 {
+        format!("{}...", &speech[..15])
+    } else {
+        speech.to_string()
+    };
+
+    let bubble_text = vec![
+        Line::from(format!("┌{}┐", bubble_border)),
+        Line::from(format!("│{}│", speech_trimmed)),
+        Line::from(format!("└{}┘", bubble_border)),
+    ];
+
+    f.render_widget(
+        Paragraph::new(bubble_text)
+            .style(Style::default().fg(colors::FG))
+            .alignment(Alignment::Left),
+        h_chunks[2],
+    );
+}
+
 fn render_pet(f: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // Name
-            Constraint::Length(5), // Pet art
+            Constraint::Length(5), // Pet art + speech bubble
             Constraint::Length(1), // Stage
             Constraint::Length(1), // Level
             Constraint::Length(1), // XP
@@ -1026,26 +1308,35 @@ fn render_pet(f: &mut Frame, area: Rect, app: &App) {
         chunks[0],
     );
 
-    // Pet art
-    let pet_art = app.game.get_pet_art(app.frame / 2);
-    let pet_text: Vec<Line> = pet_art
-        .iter()
-        .map(|line| {
-            Line::from(Span::styled(
-                *line,
-                Style::default().fg(match app.game.mood {
-                    PetMood::Working => colors::RED,
-                    PetMood::Happy => colors::YELLOW,
-                    PetMood::Resting => colors::GREEN,
-                    PetMood::Idle => colors::CYAN,
-                }),
-            ))
-        })
-        .collect();
-    f.render_widget(
-        Paragraph::new(pet_text).alignment(Alignment::Center),
-        chunks[1],
-    );
+    // Pet art with speech bubble
+    if let Some((speech, _)) = &app.pet_speech {
+        render_pet_with_speech(f, chunks[1], app, speech, match app.game.mood {
+            PetMood::Working => colors::RED,
+            PetMood::Happy => colors::YELLOW,
+            PetMood::Resting => colors::GREEN,
+            PetMood::Idle => colors::CYAN,
+        });
+    } else {
+        let pet_art = app.game.get_pet_art(app.frame / 2);
+        let pet_text: Vec<Line> = pet_art
+            .iter()
+            .map(|line| {
+                Line::from(Span::styled(
+                    *line,
+                    Style::default().fg(match app.game.mood {
+                        PetMood::Working => colors::RED,
+                        PetMood::Happy => colors::YELLOW,
+                        PetMood::Resting => colors::GREEN,
+                        PetMood::Idle => colors::CYAN,
+                    }),
+                ))
+            })
+            .collect();
+        f.render_widget(
+            Paragraph::new(pet_text).alignment(Alignment::Center),
+            chunks[1],
+        );
+    }
 
     // Stage + Type
     f.render_widget(
