@@ -24,6 +24,10 @@ use crate::game::{GameData, PetType};
 fn main() -> io::Result<()> {
     // Check for --test flag
     let test_mode = env::args().any(|arg| arg == "--test");
+    if test_mode {
+        crate::game::GameData::seed_test_save();
+        crate::game::set_test_mode(true);
+    }
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -96,10 +100,10 @@ fn main() -> io::Result<()> {
                         KeyCode::Char('4') if app.mode == Mode::Debug => {
                             // Jump to next evolution stage
                             let next_level = match app.game.pet().evolution_stage() {
-                                1 => 5,
-                                2 => 15,
-                                3 => 30,
-                                _ => app.game.pet().level + 10,
+                                1 => 2,
+                                2 => 4,
+                                3 => 6,
+                                _ => app.game.pet().level + 2,
                             };
                             let pet = app.game.pet_mut();
                             pet.level = next_level;

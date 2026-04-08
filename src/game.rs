@@ -1,6 +1,17 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static TEST_MODE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_test_mode(on: bool) {
+    TEST_MODE.store(on, Ordering::Relaxed);
+}
+
+pub fn is_test_mode() -> bool {
+    TEST_MODE.load(Ordering::Relaxed)
+}
 
 use chrono::{Local, NaiveDate, Timelike};
 use rand::Rng;
@@ -100,8 +111,10 @@ impl Pet {
     }
 
     pub fn xp_for_level(level: u32) -> u32 {
-        // XP needed: 100, 150, 225, 337, ...
-        (100.0 * 1.5_f64.powi((level - 1) as i32)) as u32
+        // Linear curve tuned so Master (lvl 6) lands around 45 sessions
+        // (~18h focus) at the current ~30 XP/session award rate.
+        // L1→2: 160, L2→3: 220, ... L5→6: 400. Cumulative to L6 ≈ 1400 XP.
+        100 + 60 * level
     }
 
     pub fn xp_to_next_level(&self) -> u32 {
@@ -117,14 +130,14 @@ impl Pet {
     }
 
     pub fn evolution_stage_for_level(level: u32) -> u32 {
-        if level < 5 {
+        if level < 2 {
             1 // Egg
-        } else if level < 15 {
+        } else if level < 4 {
             2 // Baby
-        } else if level < 30 {
+        } else if level < 6 {
             3 // Teen
         } else {
-            4 // Adult
+            4 // Master
         }
     }
 
@@ -278,12 +291,40 @@ impl LegacyGameData {
 }
 
 impl GameData {
-    fn data_path() -> PathBuf {
-        let data_dir = dirs::data_local_dir()
+    fn data_dir() -> PathBuf {
+        let dir = dirs::data_local_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("tamadoro");
-        fs::create_dir_all(&data_dir).ok();
-        data_dir.join("save.json")
+        fs::create_dir_all(&dir).ok();
+        dir
+    }
+
+    pub fn real_save_path() -> PathBuf {
+        Self::data_dir().join("save.json")
+    }
+
+    pub fn test_save_path() -> PathBuf {
+        Self::data_dir().join("save.test.json")
+    }
+
+    fn data_path() -> PathBuf {
+        if is_test_mode() {
+            Self::test_save_path()
+        } else {
+            Self::real_save_path()
+        }
+    }
+
+    /// Copy the real save to the test save path so --test runs on a clone.
+    pub fn seed_test_save() {
+        let real = Self::real_save_path();
+        let test = Self::test_save_path();
+        if real.exists() {
+            let _ = fs::copy(&real, &test);
+        } else {
+            // No real save yet — make sure we start from a clean slate.
+            let _ = fs::remove_file(&test);
+        }
     }
 
     fn backup_legacy(path: &PathBuf) {
