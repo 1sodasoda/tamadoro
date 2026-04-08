@@ -857,7 +857,7 @@ fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
     let mut app = App::new(test_mode);
-    let tick_rate = Duration::from_millis(250);
+    let tick_rate = Duration::from_millis(500);
 
     loop {
         terminal.draw(|f| ui(f, &app))?;
