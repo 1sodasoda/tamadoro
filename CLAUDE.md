@@ -15,14 +15,21 @@ Tamadoro is a single-binary terminal Pomodoro timer with a Tamagotchi-style pet,
 
 ## Architecture
 
-The entire app lives in `src/main.rs` (~1600 lines). It is intentionally one file; don't split it up unless asked. Key pieces, top-to-bottom:
+Split across small modules under `src/`:
 
-- **`PetType` (enum)** — Blob / Cat / Robot / Ghost. Each variant owns its ASCII art and the per-evolution-stage frames. Adding a pet means extending this enum and its `impl` (art, name, color).
-- **`Mode` / `PomodoroState` / `PetMood`** — UI tab + timer state machines. `Mode::Debug` is only reachable when launched with `--test`.
-- **`GameData`** — the persisted save: XP/level, streak, today's sessions, pet identity, food (0–100), `hunger_zero_since`, `is_dead`. Serialized as JSON to `dirs::data_local_dir()/tamadoro/save.json`. Newer fields use `#[serde(default)]` so old saves keep loading — preserve that pattern when adding fields. Leveling curve is `100 * 1.5^(level-1)` via `xp_for_level`. Evolution stages are derived from `level` (`evolution_stage` / `stage_name`).
-- **`App`** — runtime state that wraps `GameData` plus transient stuff (current `Mode`, pomo timer, ephemeral `message` toast, `test_mode` flag). `App::tick` advances the timer, decays food over wall-clock time, handles death, and triggers saves; `toggle_pomo` / `reset_pomo` are the input entry points.
-- **`main`** — sets up the alternate screen + raw mode, then a 250 ms poll loop: draw → handle one key event → `app.tick()`. All keybindings live here in one big `match`. Tab/BackTab cycles modes; Space toggles the timer; `r` resets in Timer mode; `1`–`9`,`0` are debug cheats gated on `Mode::Debug`.
-- **`ui` and the `render_*` helpers** — pure ratatui rendering. `render_large_clock` draws the ASCII wall clock; `render_pet_with_speech` / `render_pet` pick frames based on `evolution_stage`, `mood`, and `is_dead`; `render_timer`, `render_stats`, `render_debug` handle the other tabs.
+- **`main.rs`** — entry point, terminal setup, 500 ms poll loop, top-level key dispatch (Tab/BackTab, Space, `r`, Debug cheats `1`–`9`/`0`).
+- **`app.rs`** — `App`, `Mode`, `PomodoroState`. `App::tick` advances the timer, decays food, handles death/level-up messaging. `toggle_pomo`/`reset_pomo` are input entry points. `get_pet_phrase` picks flavor speech from pools keyed by `PetType` + `PetMood`.
+- **`game.rs`** — persistence layer. `GameData` (the save struct), `PetType`, `PetMood`, XP curve (`xp_for_level`), evolution stages, food decay (`update_food`), notifications. Save path is `dirs::data_local_dir()/tamadoro/save.json`. Newer fields use `#[serde(default)]` so old saves keep loading — preserve that pattern when adding fields.
+- **`pets.rs`** — static ASCII art tables and `get_art` / `get_dead_art`. Adding a pet species means extending `PetType` in `game.rs` and adding art + lookup arms here.
+- **`ui.rs`** — all ratatui rendering. `ui()` is the entry dispatcher; `render_timer` / `render_pet` / `render_stats` / `render_debug` handle each tab; `render_large_clock` draws the ASCII wall clock; `render_pet_with_speech` handles the speech-bubble layout.
+- **`colors.rs`**, **`ascii_digits.rs`** — small data modules.
+
+### Things to know before changing behavior
+
+- Food decay and death are computed from real timestamps in the save, not tick counts — be careful with `last_food_check` / `hunger_zero_since` so pets don't accidentally starve (or revive) across restarts.
+- State mutations should be followed by `game.save()` (see the debug handlers and `record_session` for the pattern). Autosave happens inside `tick` via `update_food` and in `record_session`; new code paths need to either call `save()` or funnel through those.
+- `Mode::Debug` is gated on `--test` — the Tab/BackTab arms in `main.rs` hide it otherwise. Mirror that pattern for any other gated mode.
+- Pet ASCII art is whitespace-sensitive — use raw string literals and don't let an editor trim trailing spaces.
 
 ### Things to know before changing behavior
 
